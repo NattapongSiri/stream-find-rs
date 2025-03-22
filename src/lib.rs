@@ -43,7 +43,36 @@ use core::{pin::Pin, task::{Context, Poll}};
 
 use futures_core::stream::Stream;
 
+/// Add find method to any stream that can be unpinned.
+/// 
+/// # How to use
+/// 1. `use stream_find::StreamFind`.
+/// 2. Any struct that implement `futures::stream::Stream` and `core::marker::Unpin` will now have method `find` which take
+/// async closure that take one argument which is item yield from stream. This closure must return `Option`` which must be
+/// `None` when it mismatch and return `Some` with value to be return for a match which usually is a value yield by stream.
 pub trait StreamFind: Stream + Unpin {
+    /// Find the first item from stream that async closure return `Some` value.
+    /// 
+    /// # Example
+    /// ```rust
+    /// # tokio_test::block_on(async {
+    /// use stream_find::StreamFind;
+    /// use futures::stream::{iter, StreamExt};
+    /// const START: usize = 0;
+    /// const END: usize = 100;
+    /// const TARGET: usize = 0;
+    /// let mut stream = iter(START..END);
+    /// let result = stream.find(async |item| {
+    ///     if item == TARGET {
+    ///         Some(item)
+    ///     } else {
+    ///         None
+    ///     }
+    /// }).await;
+    /// assert_eq!(result.unwrap(), TARGET, "Expect to found something.");
+    /// assert_eq!(stream.next().await.expect("to yield next value"), TARGET + 1, "Expect stream to be resumable and it immediately stop after it found first match.");
+    /// # })
+    /// ```
     fn find<'a, F, FR>(self: &'a mut Self, f: F) -> Find<'a, F, FR, Self> where Self: Sized, F: 'a + Unpin + FnMut(Self::Item) -> FR, FR: 'a + Future<Output = Option<Self::Item>>, Self::Item: Unpin {
         Find {
             poll_result: None,
@@ -54,6 +83,8 @@ pub trait StreamFind: Stream + Unpin {
     }
 }
 
+/// A state machine that implement [Future].
+/// This struct is return from [StreamFind::find] trait.
 pub struct Find<'a, F, FR, S> 
 where 
     F: Unpin + FnMut(S::Item) -> FR, 
