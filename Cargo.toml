@@ -3,7 +3,7 @@ name = "stream-find"
 description = "Add a `find` method to any stream."
 authors = [ "Nattapong Sirilappanich" ]
 repository = "https://github.com/NattapongSiri/stream-find-rs"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 license = "MIT"
 
