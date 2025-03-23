@@ -1,6 +1,6 @@
 [package]
 name = "stream-find"
-description = "Add a `find` method to any stream."
+description = "Add a `find` and `find_map` methods to any stream."
 authors = [ "Nattapong Sirilappanich" ]
 repository = "https://github.com/NattapongSiri/stream-find-rs"
 version = "0.3.0"
