@@ -5,20 +5,7 @@
 //! It required [core::marker::Unpin] because, as currently is, [futures_core::stream::Stream] need
 //! to be unpin to iterate over it.
 //! 
-//! The stream object is not consume so the stream can be reuse after the result is found.
-//! 
-//! The predicate function is different from [core::iter::Iterator::find]. The predicate function for
-//! stream took owned value yield out of stream and pass ownership to predicate method.
-//! If predicate function return [Option::None], it is the same as return false in [core::iter::Iterator::find].
-//! If predicate function return [Option::Some], it is the same as return true in [core::iter::Iterator::find].
-//! The value it pass back will be used as a found value so in most case, it should pass back the value it
-//! pass in to predicate function.
-//! 
-//! The reason that it work this way is because, otherwise, it required self referential struct which is
-//! required to be pinned. It will required unsafe code to make it work. To avoid using unsafe code completely,
-//! The stream yielded value won't be hold by the struct. It passed in as owned value to predicate.
-//! If predicate decided that it is not matched, the value is immediately dropped.
-//! 
+//! The stream object is not consume so the stream can be use after the result is found.
 //! # Example
 //! ```rust
 //! # tokio_test::block_on(async {
@@ -29,27 +16,20 @@
 //! const TARGET: usize = 0;
 //! let mut stream = iter(START..END);
 //! let result = stream.find(async |item| {
-//!     if item == TARGET {
-//!         Some(item)
-//!     } else {
-//!         None
-//!     }
+//!     *item == TARGET
 //! }).await;
 //! assert_eq!(result.unwrap(), TARGET, "Expect to found something.");
 //! assert_eq!(stream.next().await.expect("to yield next value"), TARGET + 1, "Expect stream to be resumable and it immediately stop after it found first match.");
 //! # })
 //! ```
-use core::{pin::Pin, task::{Context, Poll}};
-
-use futures_core::stream::Stream;
+use futures::stream::{Stream, StreamExt};
 
 /// Add find method to any stream that can be unpinned.
 /// 
 /// # How to use
 /// 1. `use stream_find::StreamFind`.
-/// 2. Any struct that implement `futures::stream::Stream` and `core::marker::Unpin` will now have method `find` which take
-/// async closure that take one argument which is item yield from stream. This closure must return `Option`` which must be
-/// `None` when it mismatch and return `Some` with value to be return for a match which usually is a value yield by stream.
+/// 2. Any struct that implement `futures::stream::Stream` and `core::marker::Unpin` will now have method `find`
+/// similar to that of Iterator trait.
 pub trait StreamFind: Stream + Unpin {
     /// Find the first item from stream that async closure return `Some` value.
     /// 
@@ -63,109 +43,21 @@ pub trait StreamFind: Stream + Unpin {
     /// const TARGET: usize = 0;
     /// let mut stream = iter(START..END);
     /// let result = stream.find(async |item| {
-    ///     if item == TARGET {
-    ///         Some(item)
-    ///     } else {
-    ///         None
-    ///     }
+    ///     *item == TARGET
     /// }).await;
     /// assert_eq!(result.unwrap(), TARGET, "Expect to found something.");
     /// assert_eq!(stream.next().await.expect("to yield next value"), TARGET + 1, "Expect stream to be resumable and it immediately stop after it found first match.");
     /// # })
     /// ```
-    fn find<'a, F, FR>(self: &'a mut Self, f: F) -> Find<'a, F, FR, Self> where Self: Sized, F: 'a + Unpin + FnMut(Self::Item) -> FR, FR: 'a + Future<Output = Option<Self::Item>>, Self::Item: Unpin {
-        Find {
-            poll_result: None,
-            predicate: f,
-            predicate_fut: None,
-            stream: Pin::new(self)
-        }
-    }
-}
-
-/// A state machine that implement [Future].
-/// This struct is return from [StreamFind::find] trait.
-pub struct Find<'a, F, FR, S> 
-where 
-    F: Unpin + FnMut(S::Item) -> FR, 
-    FR: 'a + Future<Output = Option<S::Item>>, 
-    S: Stream + Unpin, S::Item: Unpin 
-{
-    poll_result: Option<Poll<Option<S::Item>>>,
-    predicate: F,
-    predicate_fut: Option<Pin<Box<dyn Future<Output = Option<S::Item>> + 'a>>>,
-    stream: Pin<&'a mut S>,
-}
-
-impl<'a, F, FR, S> Find<'a, F, FR, S> 
-where 
-    F: Unpin + FnMut(S::Item) -> FR, 
-    FR: 'a + Future<Output = Option<S::Item>>, 
-    S: Stream + Unpin, S::Item: Unpin 
-{
-    /// Check for value from stream by call a poll_next on it and update the state accordingly.
-    /// 
-    /// There's 3 possible states in this finding operation.
-    /// 1. Wait for stream to return result.
-    /// 2. Stream return result, need executor to poll predicate function.
-    /// 3. Predicate function return result.
-    /// 
-    /// This function always reflect poll_result field to match current state.
-    fn poll_stream(self: &mut Pin<&mut Self>, cx: &mut Context<'_>) {
-        if let Poll::Ready(stream_poll_result) = self.stream.as_mut().poll_next(cx) {
-            // Stream poll return some result
-            if let Some(v) = stream_poll_result {
-                // Stream return a value, pass value to predicate function now.
-                self.predicate_fut = Some(Box::pin((self.predicate)(v)));
-                // Mark that it need a polling because predicate checking also need polling to activate
-                self.poll_result = None;
-            } else {
-                // Stream return None which mean it is depleted
-                self.poll_result = Some(Poll::Ready(None));
-            }
-        } else {
-            // Stream poll result is pending
-            self.poll_result = Some(Poll::Pending);
-        }
-    }
-}
-
-impl<'a, F, FR, S> Future for Find<'a, F, FR, S> 
-where 
-    F: Unpin + FnMut(S::Item) -> FR, 
-    FR: 'a + Future<Output = Option<S::Item>>, 
-    S: Stream + Unpin, S::Item: Unpin 
-{
-    type Output = Option<S::Item>;
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // Use while loop to take account when the stream is consume fast enough that may cause stack overflow
-        // if we recursively poll to check predicate and stream.
-        // This is due to nature of switching back and forth between two futures, polling a stream and polling a predicate.
-        // When predicate return false, it need to poll stream for next result.
-        // When stream return result, it need to poll predicate to check if it match.
-        // If the stream consume slowly, there won't be any stack overflow problem.
-        while self.as_ref().poll_result.is_none() {
-            // Loop until it return any Poll result
-            if let Some(pred_fn_poll) = &mut self.predicate_fut {
-                if let Poll::Ready(matched) = pred_fn_poll.as_mut().poll(cx) {
-                    if let Some(v) = matched {
-                        // Found value. Immediately exit loop and yield a match.
-                        return Poll::Ready(Some(v))
-                    } else {
-                        // Value mismatch, advance the stream.
-                        self.poll_stream(cx);
-                    }
-                } else {
-                    // Predicate function is still working.
-                    return Poll::Pending // Immediately exit loop and tell executor that it is in pending state.
+    fn find<P>(&mut self, mut predicate: P) -> impl Future<Output = Option<Self::Item>> where P: AsyncFnMut(&Self::Item) -> bool {
+        async move {
+            while let Some(item) = self.next().await {
+                if (predicate)(&item).await {
+                    return Some(item)
                 }
-            } else {
-                // Need to wait for stream to return result
-                self.poll_stream(cx);
             }
+            None
         }
-        // If it reach here, that mean stream is polled. Take out poll_result so next call to poll will evaluate the future.
-        return self.poll_result.take().expect("Unexpected state reached. Both stream and predicate doesn't mark for future polling but there's still no poll result.")
     }
 }
 
@@ -183,11 +75,7 @@ mod tests {
         const TARGET: usize = 0;
         let mut stream = iter(START..END);
         let result = stream.find(async |item| {
-            if item == TARGET {
-                Some(item)
-            } else {
-                None
-            }
+            *item == TARGET
         }).await;
         assert_eq!(result.unwrap(), TARGET, "Expect to found something.");
         assert_eq!(stream.next().await.expect("to yield next value"), TARGET + 1, "Expect stream to be resumable and it immediately stop after it found first match.");
@@ -199,11 +87,7 @@ mod tests {
         const TARGET: usize = 100;
         let mut stream = iter(START..END);
         let result = stream.find(async |item| {
-            if item == TARGET {
-                Some(item)
-            } else {
-                None
-            }
+            *item == TARGET
         }).await;
         assert!(result.is_none(), "Expect to found nothing.");
         assert!(stream.next().await.is_none(), "Expect stream to be depleted.");
@@ -216,20 +100,12 @@ mod tests {
         const SECOND_TARGET: usize = 20;
         let mut stream = iter(START..END);
         let result = stream.find(async |item| {
-            if item == FIRST_TARGET {
-                Some(item)
-            } else {
-                None
-            }
+            *item == FIRST_TARGET
         }).await;
         assert_eq!(result.unwrap(), FIRST_TARGET, "Expect to found something.");
         assert_eq!(stream.next().await.expect("to yield next value"), FIRST_TARGET + 1, "Expect stream to be resumable and it immediately stop after it found first match.");
         let result = stream.find(async |item| {
-            if item == SECOND_TARGET {
-                Some(item)
-            } else {
-                None
-            }
+            *item == SECOND_TARGET
         }).await;
         assert_eq!(result.unwrap(), SECOND_TARGET, "Expect to found something.");
         assert_eq!(stream.next().await.expect("to yield next value"), SECOND_TARGET + 1, "Expect stream to be resumable and it immediately stop after it found first match.");
@@ -242,20 +118,12 @@ mod tests {
         const SECOND_TARGET: usize = 99;
         let mut stream = iter(START..END);
         let result = stream.find(async |item| {
-            if item == FIRST_TARGET {
-                Some(item)
-            } else {
-                None
-            }
+            *item == FIRST_TARGET
         }).await;
         assert_eq!(result.unwrap(), FIRST_TARGET, "Expect to found something.");
         assert_eq!(stream.next().await.expect("to yield next value"), FIRST_TARGET + 1, "Expect stream to be resumable and it immediately stop after it found first match.");
         let result = stream.find(async |item| {
-            if item == SECOND_TARGET {
-                Some(item)
-            } else {
-                None
-            }
+            *item == SECOND_TARGET
         }).await;
         assert_eq!(result.unwrap(), SECOND_TARGET, "Expect to found something.");
         assert!(stream.next().await.is_none(), "Expect stream to be depleted.");
@@ -268,20 +136,12 @@ mod tests {
         const SECOND_TARGET: usize = 1; // Second target is in already yield out of stream in first find.
         let mut stream = iter(START..END);
         let result = stream.find(async |item| {
-            if item == FIRST_TARGET {
-                Some(item)
-            } else {
-                None
-            }
+            *item == FIRST_TARGET
         }).await;
         assert_eq!(result.unwrap(), FIRST_TARGET, "Expect to found something.");
         assert_eq!(stream.next().await.expect("to yield next value"), FIRST_TARGET + 1, "Expect stream to be resumable and it immediately stop after it found first match.");
         let result = stream.find(async |item| {
-            if item == SECOND_TARGET {
-                Some(item)
-            } else {
-                None
-            }
+            *item == SECOND_TARGET
         }).await;
         println!("{:?}", result);
         assert!(result.is_none(), "Expect to found nothing.");
@@ -293,7 +153,7 @@ mod tests {
         // This value should be large enough but not too large to cause test to took forever to run.
         const END: usize = 99_000_000;
         let mut stream = iter(START..END);
-        let result = stream.find(async |_item| None).await; // It should run until stream depleted
+        let result = stream.find(async |_item| false).await; // It should run until stream depleted
         assert!(result.is_none(), "Expect to found nothing.");
         assert!(stream.next().await.is_none(), "Expect stream to be depleted.");
     }

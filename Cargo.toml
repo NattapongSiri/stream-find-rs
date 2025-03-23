@@ -3,14 +3,13 @@ name = "stream-find"
 description = "Add a `find` method to any stream."
 authors = [ "Nattapong Sirilappanich" ]
 repository = "https://github.com/NattapongSiri/stream-find-rs"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 
 [dependencies]
-futures-core = "0.3.31"
+futures = "0.3.31"
 
 [dev-dependencies]
-futures = "0.3.31"
 tokio = { version = "1.44.1", features = [ "macros" ] }
 tokio-test = "0.4.4"
