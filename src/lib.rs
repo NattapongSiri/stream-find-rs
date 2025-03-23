@@ -1,6 +1,6 @@
-//! A crate to allow `find` method on [futures::stream::Stream].
+//! A crate to allow `find` and `find_map` method on [futures::stream::Stream].
 //! 
-//! This crate provides a trait [StreamFind] which add method [StreamFind::find] and [StreamFind::find_map] to any
+//! This crate provides a trait [StreamFind] which add [StreamFind::find] and [StreamFind::find_map] methods to any
 //! struct that implement trait [futures::stream::Stream] and [core::marker::Unpin].
 //! It required [core::marker::Unpin] because, as currently is, [futures::stream::Stream] need
 //! to be unpin to iterate over it.
